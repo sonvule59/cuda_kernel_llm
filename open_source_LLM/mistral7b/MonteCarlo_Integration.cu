@@ -1,55 +1,43 @@
 #include <cuda_runtime.h>
-#include <math.h>
+#include <vector_types.h>
+#include <curand_kernel.h>
 
-__device__ float sigmoid(float x) {
-    return 1.0f / (1.0f + exp(-x));
+__device__ double f(double x) {
+    // Define your function here
+    return x * x;
 }
 
-void kernel_sigmoid(float *d_input, float *d_output, int N) {
-    int idx = threadIdx.x + blockDim.x * blockIdx.x;
-    if (idx < N)
-        d_output[idx] = sigmoid(d_input[idx]);
+void integrateKernel(curandState* state, double* output, int N, double h, double a, double b) {
+    double y = 0.0;
+    double x = a + h * curand_uniform(state);
+    for (int i = 0; i < N; ++i) {
+        y += f(x);
+        x += 2 * h;
+    }
+    __syncthreads();
+    if (blockDim.x * blockIdx.x + threadIdx.x >= N) output[blockIdx.x] += y / N / h;
 }
 
-void host_sigmoid(float *h_input, float *h_output, int N) {
-    cudaMalloc((void**)&d_input, sizeof(float) * N);
-    cudaMemcpy(d_input, h_input, sizeof(float) * N, cudaMemcpyHostToDevice);
+double integrate(int N, double a, double b) {
+    int blocks = (b - a) * 1024 / (N * sizeof(double)) + 1;
+    int threadsPerBlock = 1024;
 
-    dim3 blocks(N / 256 + (N % 256 > 0 ? 1 : 0), 1, 1);
-    dim3 threads(256, 1, 1);
+    // Allocate device memory
+    double* d_output;
+    cudaMalloc(&d_output, blocks * sizeof(double));
 
-    float *d_output;
-    cudaMalloc((void**)&d_output, sizeof(float) * N);
+    curandGenerator_t generator;
+    curandCreate(&generator);
+    curandState state;
+    curand_init(generator, 0, 0, &state);
 
-    kernel_sigmoid<<<blocks, threads>>>(d_input, d_output, N);
+    // Launch the kernel on the GPU
+    integrateKernel<<<blocks, threadsPerBlock>>>(state, d_output, N, (b - a) / N, a, b);
 
-    cudaMemcpy(h_output, d_output, sizeof(float) * N, cudaMemcpyDeviceToHost);
-
-    cudaFree(d_input);
+    double result;
+    cudaMemcpy(&result, d_output, blocks * sizeof(double), cudaMemcpyDeviceToHost);
     cudaFree(d_output);
-}
+    curandDestroy(generator);
 
-int main() {
-    const int N = 1024;
-    float h_input[N];
-    float h_output[N], ref_output[N];
-
-    // Fill input array with random values for testing
-    for (int i = 0; i < N; ++i) {
-        h_input[i] = rand() / RAND_MAX * 10 - 5;
-        ref_output[i] = 1.0f / (1.0f + exp(-h_input[i]));
-    }
-
-    host_sigmoid(h_input, h_output, N);
-
-    // Check if results are close to reference implementation
-    float max_error = 0.0f;
-    for (int i = 0; i < N; ++i) {
-        float error = fabs(h_output[i] - ref_output[i]);
-        max_error = std::max(max_error, error);
-    }
-
-    printf("Max error: %.8f\n", max_error);
-
-    return 0;
+    return result;
 }

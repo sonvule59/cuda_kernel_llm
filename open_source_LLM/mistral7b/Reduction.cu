@@ -1,72 +1,47 @@
 #include <iostream>
 #include <vector_types.h>
-#include <cuda_runtime.h>
+#include <curand_kernel.h>
 
-const int N = 1024;
+const int BLOCK_SIZE = 32;
+const int NUM_BLOCKS = ceil(sizeof(float) * num / BLOCK_SIZE);
 
-__global__ void dotProductKernel(float* A, float* B, float* C) {
-    int index = threadIdx.x + blockDim.x * blockIdx.x;
-    if (index < N) {
-        int reductionIndex = log2(N);
-        int localIndex = threadIdx.x;
-        int localBase = blockDim.x * blockIdx.x;
-        float temp = 0;
-        while (reductionIndex > 0) {
-            if (localIndex % 2 == 0)
-                temp += A[index] * B[index] + C[(localBase + localIndex) / 2];
-            index >>= reductionIndex;
-            localIndex >>= reductionIndex;
-            reductionIndex--;
-        }
-        C[index] = temp;
-    }
+__global__ void kernel(float* data, float* tempSum) {
+    int idx = blockIdx.x * blockDim.x + threadIdx.x;
+    if (idx < num)
+        tempSum[blockIdx.x] += data[idx];
 }
 
-int main(void) {
-    float* A_host, *B_host, *C_host, *D_device;
-    size_t size = N * sizeof(float);
+int main() {
+    int num = 1024;
+    float* h_data;
+    float* d_data;
+    float* d_tempSum;
+    float sum;
 
-    // Allocate memory on the host for input vectors and result array
-    cudaMalloc((void**)&A_host, size);
-    cudaMalloc((void**)&B_host, size);
-    cudaMalloc((void**)&C_host, size);
+    cudaMalloc((void**)&d_data, num * sizeof(float));
+    cudaMalloc(&d_tempSum, NUM_BLOCKS * sizeof(float));
 
-    // Fill in your input data here (for simplicity, I'll use all 1s)
-    for (int i = 0; i < N; ++i) {
-        A_host[i] = 1.f;
-        B_host[i] = 1.f;
+    curand_init(0, NULL);
+    for (int i = 0; i < num; ++i) {
+        h_data[i] = static_cast<float>(curand_generate(&globalRng));
+        d_data[i] = h_data[i];
     }
 
-    // Allocate device memory and copy host data to the device
-    cudaMalloc((void**)&D_device, size);
-    cudaMemcpy(D_device, A_host, size, cudaMemcpyHostToDevice);
-    cudaMemcpy(D_device + size, B_host, size, cudaMemcpyHostToDevice);
+    kernel<<<1, BLOCK_SIZE>>>(d_data, d_tempSum);
 
-    // Set up the kernel launch configuration
-    dim3 threadsPerBlock(64);
-    dim3 blocksPerGrid((N + threadsPerBlock.x - 1) / threadsPerBlock.x);
-
-    // Launch the CUDA kernel
-    dotProductKernel<<<blocksPerGrid, threadsPerBlock>>>(D_device, D_device + N, D_device);
-
-    // Copy result back to the host
-    float* C_device;
-    cudaMalloc((void**)&C_device, size);
-    cudaMemcpy(C_device, D_device, size, cudaMemcpyDeviceToHost);
-
-    // Sum up the result on the host since there might be some carry-over from reduction
-    float sum = 0.f;
-    for (int i = 0; i < N; ++i) {
-        sum += C_device[i];
+    for (int i = 1; i < NUM_BLOCKS; ++i) {
+        if (i % 64 == 0) {
+            cudaDeviceSynchronize();
+        }
+        d_tempSum[i] += d_tempSum[i - 1];
     }
 
-    std::cout << "Dot Product: " << sum << std::endl;
+    sum = d_tempSum[NUM_BLOCKS - 1];
 
-    // Cleanup memory allocations
-    cudaFree(A_host);
-    cudaFree(B_host);
-    cudaFree(C_host);
-    cudaFree(D_device);
+    cudaFree(d_data);
+    cudaFree(d_tempSum);
+
+    std::cout << "The sum of the elements is: " << sum << std::endl;
 
     return 0;
 }

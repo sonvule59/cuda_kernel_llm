@@ -1,78 +1,50 @@
-#include <stdio.h>
 #include <cuda_runtime.h>
+#include <vector_types.h>
+#include <stddef.h>
 
-typedef struct {
-    int height;
-    int width;
-    int channels;
-    float *data;
-} Tensor;
-
-Tensor input;
-Tensor output;
-
-
-// kernel function:
-__global__ void max_pooling_kernel(const float *inputData, float *outputData, int kernelSize, int stride) {
-    int tx = blockIdx.x * blockDim.x + threadIdx.x;
-    int ty = blockIdx.y * blockDim.y + threadIdx.y;
-    int channelId = threadIdx.z;
-
-    if (tx >= kernelSize || ty >= kernelSize) return;
-
-    float maxVal = inputData[(ty * input.height + tx) * input.channels + channelId];
-    for (int i = 0; i < kernelSize; ++i) {
-        for (int j = 0; j < kernelSize; ++j) {
-            int newTx = tx + i - stride / 2;
-            int newTy = ty + j - stride / 2;
-
-            if (newTx >= 0 && newTy >= 0 && newTx < input.height && newTy < input.width) {
-                float currentVal = inputData[(newTy * input.height + newTx) * input.channels + channelId];
-                if (currentVal > maxVal) maxVal = currentVal;
-            }
-        }
+__device__ float mse(float * predictions, float * targets, int N) {
+    register float sum = 0;
+    for (int i = 0; i < N; ++i) {
+        sum += (predictions[i] - targets[i]) * (predictions[i] - targets[i]);
     }
-
-    outputData[(ty * output.height / stride + tx / stride) * output.channels + channelId] = maxVal;
+    return sum / N;
 }
 
-// host code for tensor handling:
-
-void initialize_tensors(int height, int width, int channels, float *inputData, Tensor &inputTensor, Tensor &outputTensor) {
-    inputTensor.height = height;
-    inputTensor.width = width;
-    inputTensor.channels = channels;
-    inputTensor.data = inputData;
-
-    outputTensor.height = (height + 2) / 2 * 2;
-    outputTensor.width = (width + 2) / 2 * 2;
-    outputTensor.channels = channels;
+__global__ void mseKernel(float * d_predictions, float * d_targets, float * d_mse, int N) {
+    int i = blockIdx.x * blockDim.x + threadIdx.x;
+    if (i < N)
+        d_mse[i] = mse(d_predictions, d_targets, N);
 }
 
-void max_pooling(int kernelSize, int stride, float *inputData, Tensor &inputTensor, Tensor &outputTensor) {
-    constexpr int threadsPerBlock = 256;
-    constexpr int blocksPerGridX = (inputTensor.width + threadsPerBlock - 1) / threadsPerBlock;
-    constexpr int blocksPerGridY = (inputTensor.height + threadsPerBlock - 1) / threadsPerBlock;
-
-    cudaMalloc((void **)&outputTensor.data, outputTensor.height * outputTensor.width * outputTensor.channels * sizeof(float));
-
-    max_pooling_kernel<<<blocksPerGridY, blocksPerGridX, threadsPerBlock>>>(inputData, (float *)outputTensor.data, kernelSize, stride);
+void calculateMSE(float * h_predictions, float * h_targets, float * d_predictions, float * d_targets, float * d_mse, int N, size_t bytesPerElement) {
+    dim3 grid(N / 256 + (N % 256 > 0 ? 1 : 0), 1, 1);
+    dim3 block(256, 1, 1);
+    cudaMemcpy(d_predictions, h_predictions, N * bytesPerElement, cudaMemcpyHostToDevice);
+    cudaMemcpy(d_targets, h_targets, N * bytesPerElement, cudaMemcpyHostToDevice);
+    mseKernel<<<grid, block>>>(d_predictions, d_targets, d_mse, N);
+    cudaMemcpy(h_mse, d_mse, N * sizeof(float), cudaMemcpyDeviceToHost);
 }
-// Call the function
+
 int main() {
-    int height = 10;
-    int width = 10;
-    int channels = 3;
+    float * h_predictions;
+    float * h_targets;
+    float * h_mse;
 
-    float *inputData = new float[height * width * channels]; // Allocate input tensor on the host
+    // Allocate memory for host and device
+    cudaMallocManaged(&h_predictions, N * sizeof(float));
+    cudaMallocManaged(&h_targets, N * sizeof(float));
+    cudaMallocManaged(&h_mse, N * sizeof(float));
 
-    // Populate the input data with your values here
+    // Initialize predictions and targets arrays on the host
+    // ...
 
-    Tensor inputTensor, outputTensor;
-    initialize_tensors(height, width, channels, inputData, inputTensor, outputTensor);
-    max_pooling(2, 2, inputData, inputTensor, outputTensor);
+    calculateMSE(h_predictions, h_targets, d_predictions, d_targets, h_mse, N, sizeof(float));
 
-    // Now the output tensor (outputTensor) contains the pooled data
+    // Print the MSE result
+    printf("Mean Squared Error: %f\n", h_mse[0]);
 
+    cudaFree(h_predictions);
+    cudaFree(h_targets);
+    cudaFree(h_mse);
     return 0;
 }

@@ -1,65 +1,41 @@
 #include <iostream>
-#define N 1024
+#include <thrust/device_vector.h>
+#include <thrust/copy.h>
 
-__global__ void reduce(int *d_data, int *d_scratch) {
-    int idx = threadIdx.x + blockDim.x * blockIdx.x;
-    if (idx < N) {
-        __shared__ int localData[N];
-        int blockStart = idx - (blockDim.x >> 1) * blockIdx.x;
+__global__ void reluKernel(float *d_input, float *d_output, int size) {
+    int idx = blockIdx.x * blockDim.x + threadIdx.x;
+    if (idx >= size) return;
 
-        localData[threadIdx.x] = d_data[idx];
-        __syncthreads();
-
-        for (int i = blockStart; i < N && i < blockStart + (blockDim.x >> 1); ++i) {
-            if (localData[i] > localData[threadIdx.x])
-                localData[threadIdx.x] = localData[i];
-            __syncthreads();
-        }
-
-        if (threadIdx.x == 0)
-            d_scratch[blockIdx.x] = localData[0];
-        __syncthreads();
-    }
-}
-
-__global__ void sumReduction(int *d_scratch, int *d_output) {
-    if (blockIdx.x == 0 && threadIdx.x == 0) {
-        d_output[0] = d_scratch[0];
-        for (int i = 1; i < blockDim.x; ++i) {
-            d_output[0] += d_scratch[i];
-        }
-    }
-}
-
-void host_code() {
-    int *h_data, *d_data, *d_scratch, *d_output;
-    size_t bytesPerInt = sizeof(int);
-    cudaMalloc((void **)&d_data, N * bytesPerInt);
-    cudaMalloc((void **)&d_scratch, (blockDim.x * bytesPerInt));
-    cudaMalloc((void **)&d_output, bytesPerInt);
-
-    h_data = new int[N];
-    for (int i = 0; i < N; ++i) {
-        h_data[i] = i;
-    }
-
-    cudaMemcpy(d_data, h_data, N * bytesPerInt, cudaMemcpyHostToDevice);
-
-    int blockCount = (N + blockDim.x - 1) / blockDim.x;
-    reduce<<<blockCount, blockDim.x>>>(d_data, d_scratch);
-    sumReduction<<<1, 1>>>(d_scratch, d_output);
-
-    int output;
-    cudaMemcpy(&output, d_output, bytesPerInt, cudaMemcpyDeviceToHost);
-    std::cout << "Sum of the array is: " << output << std::endl;
-
-    delete[] h_data;
-    cudaFree(d_data);
-    cudaFree(d_scratch);
-    cudaFree(d_output);
+    d_output[idx] = (d_input[idx] > 0) ? d_input[idx] : 0;
 }
 
 int main() {
-    host_code();
+    const int size = 32;
+    float *h_input, *h_output, *d_input, *d_output;
+
+    h_input = new float[size];
+    h_output = new float[size];
+
+    cudaMalloc((void**)&d_input, size*sizeof(float));
+    cudaMalloc((void**)&d_output, size*sizeof(float));
+
+    for (int i = 0; i < size; ++i) {
+        h_input[i] = -3.5 + i * 0.7; // Generate example input vector
+    }
+
+    cudaMemcpy(d_input, h_input, size*sizeof(float), cudaMemcpyHostToDevice);
+
+    dim3 threadsPerBlock(size);
+    dim3 blocksPerGrid(1, 1, 1);
+
+    reluKernel<<<blocksPerGrid, threadsPerBlock>>>(d_input, d_output, size);
+
+    cudaMemcpy(h_output, d_output, size*sizeof(float), cudaMemcpyDeviceToHost);
+
+    delete [] h_input;
+    delete [] h_output;
+    cudaFree(d_input);
+    cudaFree(d_output);
+
     return 0;
 }

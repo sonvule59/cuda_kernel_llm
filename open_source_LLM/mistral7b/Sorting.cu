@@ -1,58 +1,49 @@
 #include <iostream>
-#include <vector>
-#define N 1024
+#include <cuda_runtime.h>
 
-__global__ void multiply(float* C, const float* A, const float* B) {
-    int idx = threadIdx.x + blockDim.x * blockIdx.x;
-    if (idx < N)
-        C[idx] = A[idx] * B[idx];
+const int BLOCK_SIZE = 256;
+
+__global__ void bubbleSort(float *arr, int n) {
+    for (int i = 0; i < n - 1; ++i) {
+        for (int j = i + 1; j < n; ++j) {
+            if (arr[i] > arr[j]) {
+                float temp = arr[i];
+                arr[i] = arr[j];
+                arr[j] = temp;
+            }
+        }
+    }
 }
 
-int main() {
-    float* h_A, *h_B, *h_C, *d_A, *d_B, *d_C;
-    size_t size = N * sizeof(float);
+int main(void) {
+    int n = 1024; // number of elements in the array
+    float *d_arr, *h_arr;
+    cudaMalloc((void **)&d_arr, n * sizeof(float));
+    h_arr = new float[n];
 
-    // Allocate host memory for input and output arrays
-    h_A = new float[N];
-    h_B = new float[N];
-    h_C = new float[N];
-
-    // Allocate device memory for input and output arrays
-    cudaMalloc((void**)&d_A, size);
-    cudaMalloc((void**)&d_B, size);
-    cudaMalloc((void**)&d_C, size);
-
-    // Copy host data to device memory
-    cudaMemcpy(d_A, h_A, size, cudaMemcpyHostToDevice);
-    cudaMemcpy(d_B, h_B, size, cudaMemcpyHostToDevice);
-
-    // Set up input arrays with random values
-    for (int i = 0; i < N; ++i) {
-        h_A[i] = static_cast<float>(rand()) / RAND_MAX;
-        h_B[i] = static_cast<float>(rand()) / RAND_MAX;
+    for (int i = 0; i < n; ++i) {
+        h_arr[i] = static_cast<float>(rand()) / RAND_MAX; // initialize array with random values
     }
 
-    // Set up kernel grid and block dimensions
-    int threadsPerBlock = 256;
-    int blocksPerGrid = (N + threadsPerBlock - 1) / threadsPerBlock;
+    cudaMemcpy(d_arr, h_arr, n * sizeof(float), cudaMemcpyHostToDevice);
 
-    // Launch the kernel on the GPU
-    multiply<<<blocksPerGrid, threadsPerBlock>>>(d_C, d_A, d_B);
+    bubbleSort<<<1, BLOCK_SIZE>>>(d_arr, n);
 
-    // Copy device data back to host memory
-    cudaMemcpy(h_C, d_C, size, cudaMemcpyDeviceToHost);
+    cudaMemcpy(h_arr, d_arr, n * sizeof(float), cudaMemcpyDeviceToHost);
 
-    // Clean up memory and print the results
-    cudaFree(d_A);
-    cudaFree(d_B);
-    cudaFree(d_C);
-    delete[] h_A;
-    delete[] h_B;
-    delete[] h_C;
+    delete[] h_arr;
 
-    for (int i = 0; i < N; ++i) {
-        std::cout << "Result[" << i << "] = " << h_C[i] << std::endl;
+    // Verify the sorted array
+    bool isSorted = true;
+    for (int i = 0; i < n - 1; ++i) {
+        if (h_arr[i] > h_arr[i + 1]) {
+            isSorted = false;
+            break;
+        }
     }
 
+    std::cout << (isSorted ? "Sorted!" : "Not sorted!") << std::endl;
+
+    cudaFree(d_arr);
     return 0;
 }

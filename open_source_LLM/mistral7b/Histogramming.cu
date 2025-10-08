@@ -1,110 +1,46 @@
-// **matrix_multiplication.cu:**
-#include <sm_35.h>
-
-__global__ void matMul(float* A, float* B, float* C, int M, int K, int N) {
-    int i = blockIdx.x * blockDim.x + threadIdx.x;
-    int j = blockIdx.y * blockDim.y + threadIdx.y;
-
-    __shared__ float temp[M * BLOCK_SIZE];
-
-    if (i < M) {
-        for (int k = j * BLOCK_SIZE + min(BLOCK_SIZE, N); k < min((j + 1) * BLOCK_SIZE, N); k++) {
-            int index = i * N + k;
-            temp[i] += A[i * K + k] * B[k * M + i];
-        }
-    }
-
-    if (i == 0) __syncthreads();
-
-    if (i < M) {
-        temp[i] += temp[i + blockDim.x];
-        __syncthreads();
-    }
-
-    if (i == 0) {
-        C[i * N + j] = temp[0];
-        for (int p = 1; p < M; ++p) {
-            C[i * N + j] += temp[p];
-            __syncthreads();
-        }
-    }
-}
-
-void launchKernel(float* A, float* B, float* C, int M, int K, int N, int blockSize) {
-    int blocks = ((M + blockSize - 1) / blockSize);
-    dim3 grid(blocks, ceil((float)N / (float)blockSize));
-    dim3 threads(blockSize, blockSize);
-    matMul<<<grid, threads>>>(A, B, C, M, K, N);
-}
-
-// **main.cpp:**
-
-
 #include <iostream>
 #include <vector>
-#include <cuda_runtime.h>
+#include <curand_kernel.h>
 
-void checkCudaError(cudaError_t err, const char* operation) {
-    if (err != cudaSuccess) {
-        std::cerr << "Error during " << operation << ": " << cudaGetErrorString(err) << "\n";
+const int N = 1000000; // Input array size
+const int numBins = 1024; // Number of bins
+
+__global__ void kernel(int *input, int *output, int numBins) {
+    int index = blockIdx.x * blockDim.x + threadIdx.x;
+    if (index < N) {
+        output[input[index]] += 1;
     }
 }
 
-int main() {
-    int M = 128;
-    int K = 32;
-    int N = 64;
+int main(void) {
+    int *input, *output;
+    curandGenerator_t generator;
+    curandState_t state;
+    int *d_output;
 
-    std::vector<float> A(M * K);
-    std::vector<float> B(K * N);
-    std::vector<float> C(M * N);
+    std::vector<int> h_input(N), h_output(numBins);
+    cudaMalloc((void **)&input, N * sizeof(int));
+    cudaMalloc((void **)&d_output, numBins * sizeof(int));
 
-    // Initialize matrices A and B
-    for (size_t i = 0; i < A.size(); ++i) {
-        A[i] = (rand() % 100) / 10.0f;
-        B[i] = (rand() % 100) / 10.0f;
+    curandCreateGenerator(&generator, CURAND_RNG_PSEUDO_RANDOM);
+    curandInit(generator, CURAND_RNG_ALG_AES, CURAND_DETERMINISTIC);
+    curandSetPseudoRandomGeneratorSeed(generator, 0);
+
+    for (int i = 0; i < N; ++i) {
+        h_input[i] = curandGenInteger(generator, 32767) + 1; // Generate random integers in range [1, 32768]
     }
 
-    float* d_A, *d_B, *d_C;
-    cudaMalloc((void**)&d_A, A.size() * sizeof(float));
-    cudaMalloc((void**)&d_B, B.size() * sizeof(float));
-    cudaMalloc((void**)&d_C, C.size() * sizeof(float));
-    checkCudaError(cudaMemcpy(d_A, A.data(), A.size() * sizeof(float), cudaMemcpyHostToDevice));
-    checkCudaError(cudaMemcpy(d_B, B.data(), B.size() * sizeof(float), cudaMemcpyHostToDevice));
+    cudaMemcpy(input, h_input.data(), N * sizeof(int), cudaMemcpyHostToDevice);
 
-    int blockSize = 32; // Adjust this value for optimal shared memory usage and memory coalescing
-    launchKernel<matMul>(d_A, d_B, d_C, M, K, N, blockSize);
-    checkCudaError(cudaDeviceSynchronize());
+    dim3 threadsPerBlock(32, 1, 1);
+    dim3 numBlocks((N + threadsPerBlock.x - 1) / threadsPerBlock.x);
+    kernel<<<numBlocks, threadsPerBlock>>>(input, d_output, numBins);
 
-    cudaMemcpy(C.data(), d_C, C.size() * sizeof(float), cudaMemcpyDeviceToHost);
+    cudaMemcpy(h_output.data(), d_output, numBins * sizeof(int), cudaMemcpyDeviceToHost);
 
-    std::cout << "Matrix multiplication completed\n";
-
-    // Check the result for small matrices
-    if (M < 10 && N < 10) {
-        bool correct = true;
-        float* d_CRef(nullptr);
-        cudaMalloc((void**)&d_CRef, C.size() * sizeof(float));
-
-        for (size_t i = 0; i < C.size(); ++i) {
-            float ref = 0.0f;
-            for (int k = 0; k < K; ++k) {
-                ref += A[i * K + k] * B[k * M + i];
-            }
-            correct &= fabs(C[i] - ref) < 1e-5f;
-        }
-        checkCudaError(cudaFree(d_CRef));
-
-        if (correct) {
-            std::cout << "Result is correct\n";
-        } else {
-            std::cout << "Result is incorrect\n";
-        }
-    }
-
-    cudaFree(d_A);
-    cudaFree(d_B);
-    cudaFree(d_C);
+    curandDestroyGenerator(generator);
+    cudaFree(input);
+    cudaFree(d_output);
 
     return 0;
 }

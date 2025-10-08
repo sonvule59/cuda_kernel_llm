@@ -1,58 +1,48 @@
-#include <iostream>
-#include <cuda_runtime.h>
+#include <cuda.h>
+#include <stdio.h>
 
-// Define the global constants
-const unsigned int batchSize = 16;
-const unsigned int channels = 32;
-const unsigned int height = 64;
-const unsigned int width = 128;
+int main() {
+    const int len = 32;
+    float *a_device, *b_device, *result_device;
+    float *a_host = new float[len];
+    float *b_host = new float[len];
+    float *c_host = new float[len];
 
-// Define the ReLU kernel function
-__global__ void reluKernel(float* d_in, float* d_out) {
-    unsigned int idx = threadIdx.x + blockDim.x * blockIdx.x;
-    if (idx < batchSize * channels * height * width) {
-        d_out[idx] = max(d_in[idx], 0.0f);
-    }
-}
+    cudaMalloc((void **)&a_device, len * sizeof(float));
+    cudaMalloc((void **)&b_device, len * sizeof(float));
+    cudaMalloc((void **)&result_device, len * sizeof(float));
 
-int main(void) {
-    // Allocate device memory for input and output tensors
-    float* h_in;
-    float* h_out;
-    cudaMalloc((void**)&h_in, batchSize * channels * height * width * sizeof(float));
-    cudaMalloc((void**)&h_out, batchSize * channels * height * width * sizeof(float));
-
-    // Initialize input tensor on the host
-    for (int i = 0; i < batchSize * channels * height * width; ++i) {
-        h_in[i] = static_cast<float>(rand() - rand() / RAND_MAX * 2);
+    // Initialize host vectors a and b
+    for (int i = 0; i < len; ++i) {
+        a_host[i] = i + 1.f;
+        b_host[i] = 2.f * i + 3.f;
     }
 
-    // Transfer input tensor to the device
-    cudaMemcpy(d_in, h_in, batchSize * channels * height * width * sizeof(float), cudaMemcpyHostToDevice);
+    cudaMemcpy(a_device, a_host, len * sizeof(float), cudaMemcpyHostToDevice);
+    cudaMemcpy(b_device, b_host, len * sizeof(float), cudaMemcpyHostToDevice);
 
-    // Set up the grid and block dimensions for the kernel launch
-    unsigned int threadsPerBlock = 256;
-    unsigned int blocksPerGrid = (batchSize * channels * height * width + threadsPerBlock - 1) / threadsPerBlock;
+    // Set up kernel launch configuration
+    dim3 threadsPerBlock(32);
+    dim3 blocksPerGrid((len + threadsPerBlock.x - 1) / threadsPerBlock.x, 1);
 
-    // Launch the ReLU kernel on the device
-    reluKernel<<<blocksPerGrid, threadsPerBlock>>>(d_in, d_out);
+    dotProduct<<<blocksPerGrid, threadsPerBlock>>>(a_device, b_device, result_device, len);
 
-    // Transfer output tensor back to the host for verification
-    cudaMemcpy(h_out, d_out, batchSize * channels * height * width * sizeof(float), cudaMemcpyDeviceToHost);
+    // Copy result back to the host
+    cudaMemcpy(c_host, result_device, len * sizeof(float), cudaMemcpyDeviceToHost);
 
-    // Verification of the ReLU function results
-    for (int i = 0; i < batchSize * channels * height * width; ++i) {
-        if (h_out[i] < 0.0f || h_in[i] >= 0.0f && h_out[i] == h_in[i]) {
-            std::cout << "Error: ReLU function did not produce correct results." << std::endl;
-            return -1;
-        }
+    printf("Dot product: \n");
+    for (int i = 0; i < len; ++i) {
+        printf("%f ", c_host[i]);
     }
+    printf("\n");
 
-    // Print success message
-    std::cout << "ReLU kernel execution successful!" << std::endl;
+    // Clean up resources
+    cudaFree(a_device);
+    cudaFree(b_device);
+    cudaFree(result_device);
+    delete[] a_host;
+    delete[] b_host;
+    delete[] c_host;
 
-    // Free the device memory and deallocate the pointers
-    cudaFree(d_in);
-    cudaFree(d_out);
     return 0;
 }

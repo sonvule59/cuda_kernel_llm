@@ -1,58 +1,51 @@
 #include <iostream>
+#include <curand_kernel.h>
 #include <cuda_runtime.h>
 
-// Define the global constants
-const unsigned int batchSize = 16;
-const unsigned int channels = 32;
-const unsigned int height = 64;
-const unsigned int width = 128;
-
-// Define the ReLU kernel function
-__global__ void reluKernel(float* d_in, float* d_out) {
-    unsigned int idx = threadIdx.x + blockDim.x * blockIdx.x;
-    if (idx < batchSize * channels * height * width) {
-        d_out[idx] = max(d_in[idx], 0.0f);
+const int N = 1024;
+__global__ void prefixSum(float *input, float *output) {
+    int idx = threadIdx.x + blockDim.x * blockIdx.x;
+    if (idx < N) {
+        output[idx] = (idx == 0) ? input[idx] : output[idx - 1] + input[idx];
     }
 }
 
 int main(void) {
-    // Allocate device memory for input and output tensors
-    float* h_in;
-    float* h_out;
-    cudaMalloc((void**)&h_in, batchSize * channels * height * width * sizeof(float));
-    cudaMalloc((void**)&h_out, batchSize * channels * height * width * sizeof(float));
+    float *h_input, *h_output;
+    float *d_input, *d_output;
+    cudaMalloc((void**)&d_input, N * sizeof(float));
+    cudaMalloc((void**)&d_output, N * sizeof(float));
 
-    // Initialize input tensor on the host
-    for (int i = 0; i < batchSize * channels * height * width; ++i) {
-        h_in[i] = static_cast<float>(rand() - rand() / RAND_MAX * 2);
+    h_input = new float[N];
+    h_output = new float[N];
+
+    // Initialize the input array with random numbers for demonstration purposes
+    curandGenerator_t generator;
+    curandCreateGenerator(&generator, CURAND_RNG_PSEUDO_RANDOM, NULL);
+    curandSetStream(generator, 0);
+    curand_kernel(d_input, N, generator);
+
+    cudaMemcpy(d_input, h_input, N * sizeof(float), cudaMemcpyHostToDevice);
+
+    dim3 block(32);
+    dim3 grid((N + block.x - 1) / block.x);
+    prefixSum<<<grid, block>>>(d_input, d_output);
+
+    cudaMemcpy(h_output, d_output, N * sizeof(float), cudaMemcpyDeviceToHost);
+
+    std::cout << "Input array:" << std::endl;
+    for (int i = 0; i < N; ++i) {
+        std::cout << h_input[i] << ", ";
+    }
+    std::cout << "\nCumulative sum array: " << std::endl;
+    for (int i = 0; i < N; ++i) {
+        std::cout << h_output[i] << ", ";
     }
 
-    // Transfer input tensor to the device
-    cudaMemcpy(d_in, h_in, batchSize * channels * height * width * sizeof(float), cudaMemcpyHostToDevice);
+    cudaFree(d_input);
+    cudaFree(d_output);
+    delete[] h_input;
+    delete[] h_output;
 
-    // Set up the grid and block dimensions for the kernel launch
-    unsigned int threadsPerBlock = 256;
-    unsigned int blocksPerGrid = (batchSize * channels * height * width + threadsPerBlock - 1) / threadsPerBlock;
-
-    // Launch the ReLU kernel on the device
-    reluKernel<<<blocksPerGrid, threadsPerBlock>>>(d_in, d_out);
-
-    // Transfer output tensor back to the host for verification
-    cudaMemcpy(h_out, d_out, batchSize * channels * height * width * sizeof(float), cudaMemcpyDeviceToHost);
-
-    // Verification of the ReLU function results
-    for (int i = 0; i < batchSize * channels * height * width; ++i) {
-        if (h_out[i] < 0.0f || h_in[i] >= 0.0f && h_out[i] == h_in[i]) {
-            std::cout << "Error: ReLU function did not produce correct results." << std::endl;
-            return -1;
-        }
-    }
-
-    // Print success message
-    std::cout << "ReLU kernel execution successful!" << std::endl;
-
-    // Free the device memory and deallocate the pointers
-    cudaFree(d_in);
-    cudaFree(d_out);
     return 0;
 }

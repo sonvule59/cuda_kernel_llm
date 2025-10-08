@@ -1,110 +1,80 @@
-// **matrix_multiplication.cu:**
-#include <sm_35.h>
-
-__global__ void matMul(float* A, float* B, float* C, int M, int K, int N) {
-    int i = blockIdx.x * blockDim.x + threadIdx.x;
-    int j = blockIdx.y * blockDim.y + threadIdx.y;
-
-    __shared__ float temp[M * BLOCK_SIZE];
-
-    if (i < M) {
-        for (int k = j * BLOCK_SIZE + min(BLOCK_SIZE, N); k < min((j + 1) * BLOCK_SIZE, N); k++) {
-            int index = i * N + k;
-            temp[i] += A[i * K + k] * B[k * M + i];
-        }
-    }
-
-    if (i == 0) __syncthreads();
-
-    if (i < M) {
-        temp[i] += temp[i + blockDim.x];
-        __syncthreads();
-    }
-
-    if (i == 0) {
-        C[i * N + j] = temp[0];
-        for (int p = 1; p < M; ++p) {
-            C[i * N + j] += temp[p];
-            __syncthreads();
-        }
-    }
-}
-
-void launchKernel(float* A, float* B, float* C, int M, int K, int N, int blockSize) {
-    int blocks = ((M + blockSize - 1) / blockSize);
-    dim3 grid(blocks, ceil((float)N / (float)blockSize));
-    dim3 threads(blockSize, blockSize);
-    matMul<<<grid, threads>>>(A, B, C, M, K, N);
-}
-
-// **main.cpp:**
-
-
 #include <iostream>
 #include <vector>
 #include <cuda_runtime.h>
 
-void checkCudaError(cudaError_t err, const char* operation) {
-    if (err != cudaSuccess) {
-        std::cerr << "Error during " << operation << ": " << cudaGetErrorString(err) << "\n";
+const int BLOCK_SIZE = 32;
+
+void matVecMult(float* d_A, float* d_X, int rows, int cols);
+void matMatMultInvTrans(float* d_A, float* d_Beta, float* d_AT, int cols);
+
+__global__ void matVecMult(float* d_A, float* d_X, int rows, int cols) {
+    int idx = blockIdx.x * blockDim.x + threadIdx.x;
+    if (idx < rows) {
+        float sum = 0.f;
+        for (int i = 0; i < cols; ++i) {
+            int jdx = idx * cols + i;
+            sum += d_X[jdx] * d_X[(cols + i) * rows + idx];
+        }
+        d_A[idx * (cols + 1)] = sum;
+        for (int k = 1; k < idx; ++k) {
+            d_A[idx * (cols + 1) + k] = sum;
+        }
     }
 }
 
-int main() {
-    int M = 128;
-    int K = 32;
-    int N = 64;
-
-    std::vector<float> A(M * K);
-    std::vector<float> B(K * N);
-    std::vector<float> C(M * N);
-
-    // Initialize matrices A and B
-    for (size_t i = 0; i < A.size(); ++i) {
-        A[i] = (rand() % 100) / 10.0f;
-        B[i] = (rand() % 100) / 10.0f;
-    }
-
-    float* d_A, *d_B, *d_C;
-    cudaMalloc((void**)&d_A, A.size() * sizeof(float));
-    cudaMalloc((void**)&d_B, B.size() * sizeof(float));
-    cudaMalloc((void**)&d_C, C.size() * sizeof(float));
-    checkCudaError(cudaMemcpy(d_A, A.data(), A.size() * sizeof(float), cudaMemcpyHostToDevice));
-    checkCudaError(cudaMemcpy(d_B, B.data(), B.size() * sizeof(float), cudaMemcpyHostToDevice));
-
-    int blockSize = 32; // Adjust this value for optimal shared memory usage and memory coalescing
-    launchKernel<matMul>(d_A, d_B, d_C, M, K, N, blockSize);
-    checkCudaError(cudaDeviceSynchronize());
-
-    cudaMemcpy(C.data(), d_C, C.size() * sizeof(float), cudaMemcpyDeviceToHost);
-
-    std::cout << "Matrix multiplication completed\n";
-
-    // Check the result for small matrices
-    if (M < 10 && N < 10) {
-        bool correct = true;
-        float* d_CRef(nullptr);
-        cudaMalloc((void**)&d_CRef, C.size() * sizeof(float));
-
-        for (size_t i = 0; i < C.size(); ++i) {
-            float ref = 0.0f;
-            for (int k = 0; k < K; ++k) {
-                ref += A[i * K + k] * B[k * M + i];
-            }
-            correct &= fabs(C[i] - ref) < 1e-5f;
+__global__ void matMatMultInvTrans(float* d_A, float* d_Beta, float* d_AT, int cols) {
+    // Inverse of a matrix and its transpose are the same when it's square and symmetric.
+    int idx = blockIdx.x * blockDim.x + threadIdx.x;
+    if (idx < cols) {
+        float sum = 0.f;
+        for (int i = 0; i < cols; ++i) {
+            sum += d_AT[idx * cols + i] * d_A[(cols + i) * (cols + 1) + idx];
         }
-        checkCudaError(cudaFree(d_CRef));
-
-        if (correct) {
-            std::cout << "Result is correct\n";
-        } else {
-            std::cout << "Result is incorrect\n";
-        }
+        d_Beta[idx] = d_y[idx] / sum;
     }
+}
 
+void cudaOls(const std::vector<std::vector<float>>& X, const std::vector<float>& y, std::vector<float>& beta) {
+    dim3 blockDim(BLOCK_SIZE, BLOCK_SIZE);
+    dim3 gridDim((X.size() + blockDim.x - 1) / blockDim.x, (X[0].size() + blockDim.y - 1) / blockDim.y);
+
+    float* d_X;
+    float* d_y;
+    float* d_A;
+    float* d_beta;
+
+    cudaMalloc((void**)&d_X, X.size() * X[0].size() * sizeof(float));
+    cudaMemcpy(d_X, X.data(), X.size() * X[0].size() * sizeof(float), cudaMemcpyHostToDevice);
+
+    cudaMalloc((void**)&d_y, X.size() * sizeof(float));
+    cudaMemcpy(d_y, y.data(), X.size() * sizeof(float), cudaMemcpyHostToDevice);
+
+    cudaMalloc((void**)&d_A, (X[0].size() + 1) * (X[0].size() + 1) * sizeof(float));
+    cudaMalloc((void**)&d_beta, X[0].size() * sizeof(float));
+
+    matVecMult<<<gridDim, blockDim>>>(d_A, d_X, X.size(), X[0].size());
+    matMatMultInvTrans<<<gridDim, blockDim>>>(d_A, d_beta, d_A, X[0].size());
+
+    cudaMemcpy(beta.data(), d_beta, X[0].size() * sizeof(float), cudaMemcpyDeviceToHost);
+    cudaFree(d_X);
+    cudaFree(d_y);
     cudaFree(d_A);
-    cudaFree(d_B);
-    cudaFree(d_C);
+    cudaFree(d_beta);
+}
+
+int main() {
+    // Initialize the X and y data...
+    std::vector<std::vector<float>> X = ...;
+    std::vector<float> y = ...;
+
+    std::vector<float> beta(X[0].size());
+
+    cudaOls(X, y, beta);
+
+    // Print the solution...
+    for (const auto& b : beta) {
+        std::cout << b << ' ';
+    }
 
     return 0;
 }

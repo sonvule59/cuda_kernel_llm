@@ -1,55 +1,49 @@
+#include <iostream>
 #include <cuda_runtime.h>
-#include <math.h>
 
-__device__ float sigmoid(float x) {
-    return 1.0f / (1.0f + exp(-x));
-}
-
-void kernel_sigmoid(float *d_input, float *d_output, int N) {
-    int idx = threadIdx.x + blockDim.x * blockIdx.x;
-    if (idx < N)
-        d_output[idx] = sigmoid(d_input[idx]);
-}
-
-void host_sigmoid(float *h_input, float *h_output, int N) {
-    cudaMalloc((void**)&d_input, sizeof(float) * N);
-    cudaMemcpy(d_input, h_input, sizeof(float) * N, cudaMemcpyHostToDevice);
-
-    dim3 blocks(N / 256 + (N % 256 > 0 ? 1 : 0), 1, 1);
-    dim3 threads(256, 1, 1);
-
-    float *d_output;
-    cudaMalloc((void**)&d_output, sizeof(float) * N);
-
-    kernel_sigmoid<<<blocks, threads>>>(d_input, d_output, N);
-
-    cudaMemcpy(h_output, d_output, sizeof(float) * N, cudaMemcpyDeviceToHost);
-
-    cudaFree(d_input);
-    cudaFree(d_output);
-}
-
-int main() {
-    const int N = 1024;
-    float h_input[N];
-    float h_output[N], ref_output[N];
-
-    // Fill input array with random values for testing
-    for (int i = 0; i < N; ++i) {
-        h_input[i] = rand() / RAND_MAX * 10 - 5;
-        ref_output[i] = 1.0f / (1.0f + exp(-h_input[i]));
+__device__ void lossFunction(float* z, float* y, float* dL, int c) {
+    float L = 0.f;
+    for (int j = 0; j < c; ++j) {
+        L += logf(expf(z[j]) - expf(dL[j]));
     }
-
-    host_sigmoid(h_input, h_output, N);
-
-    // Check if results are close to reference implementation
-    float max_error = 0.0f;
-    for (int i = 0; i < N; ++i) {
-        float error = fabs(h_output[i] - ref_output[i]);
-        max_error = std::max(max_error, error);
+    L -= y[0] * dL[0];
+    for (int j = 1; j < c; ++j) {
+        L -= y[j] * (logf(expf(dL[j])) - logf(expf(z[j]) - expf(dL[j])));
     }
-
-    printf("Max error: %.8f\n", max_error);
-
-    return 0;
+    __syncthreads();
+    L /= c;
+    if (threadIdx.x == 0) {
+        dL[0] = L;
+    }
 }
+
+void calculateCrossEntropyLoss(float* predictedLogits, float* trueLabels, float* loss, int N, int C) {
+    float* dL = new float[C];
+
+    dim3 blockSize(32);
+    dim3 gridSize((N + blockSize.x - 1) / blockSize.x, 1);
+
+    float* dev_predictedLogits;
+    float* dev_trueLabels;
+    float* dev_dL;
+    cudaMalloc((void**)&dev_predictedLogits, N * C * sizeof(float));
+    cudaMalloc((void**)&dev_trueLabels, N * sizeof(float));
+    cudaMalloc((void**)&dev_dL, C * sizeof(float));
+
+    cudaMemcpy(dev_predictedLogits, predictedLogits, N * C * sizeof(float), cudaMemcpyHostToDevice);
+    cudaMemcpy(dev_trueLabels, trueLabels, N * sizeof(float), cudaMemcpyHostToDevice);
+
+    lossFunction<<<gridSize, blockSize>>>(dev_predictedLogits, dev_trueLabels, dev_dL, C);
+    cudaMemcpy(loss, dev_dL, C * sizeof(float), cudaMemcpyDeviceToHost);
+    cudaFree(dev_predictedLogits);
+    cudaFree(dev_trueLabels);
+    cudaFree(dev_dL);
+}
+// Usage:
+// Prepare input arrays
+float predictedLogits[N][C];
+float trueLabels[N];
+
+// Call the function to compute the loss
+float loss;
+calculateCrossEntropyLoss(predictedLogits, trueLabels, &loss, N, C);
